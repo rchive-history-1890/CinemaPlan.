@@ -1,0 +1,1154 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#090a0d" />
+  <title>CinePlan</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+          },
+          colors: {
+            surface: {
+              bg: '#090a0d',
+              card: '#12141a',
+              elevated: '#191c24',
+              border: '#232733',
+              muted: '#7e8696'
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    * {
+      -webkit-tap-highlight-color: transparent;
+      box-sizing: border-box;
+    }
+    body {
+      background-color: #050608;
+      color: #f4f5f7;
+      font-family: 'Inter', sans-serif;
+      margin: 0;
+      padding: 0;
+      overscroll-behavior-y: contain;
+    }
+    ::-webkit-scrollbar {
+      width: 5px;
+      height: 5px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #232733;
+      border-radius: 9999px;
+    }
+    .sheet-anim {
+      animation: sheetUp 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes sheetUp {
+      from { transform: translateY(24px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    .fade-in {
+      animation: fadeIn 0.16s ease-out;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    input[type="date"]::-webkit-calendar-picker-indicator {
+      filter: invert(0.8);
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex justify-center bg-[#050608] selection:bg-amber-500 selection:text-black">
+
+  <!-- App Container (Mobile-First, Centered on Desktop) -->
+  <div id="app" class="w-full max-w-lg min-h-screen bg-surface-bg border-x border-surface-border/50 flex flex-col relative">
+    
+    <!-- Minimalist Top Header -->
+    <header id="app-header" class="sticky top-0 z-30 bg-surface-bg/90 backdrop-blur-md border-b border-surface-border/70 px-4 h-14 flex items-center justify-between gap-3">
+      <!-- Dynamic Header -->
+    </header>
+
+    <!-- Main Viewport -->
+    <main id="app-main" class="flex-1 flex flex-col p-4 pb-10">
+      <!-- Dynamic Screen -->
+    </main>
+
+    <!-- Subtle Toast -->
+    <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 pointer-events-none opacity-0 transition-all duration-200">
+      <div class="bg-surface-elevated border border-surface-border text-gray-100 text-xs font-medium px-4 py-2 rounded-full shadow-2xl">
+        <span id="toast-msg">Сохранено</span>
+      </div>
+    </div>
+
+    <!-- Clean Modal / Bottom Sheet -->
+    <div id="modal-backdrop" class="hidden fixed inset-0 z-40 bg-black/80 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4" onclick="closeModalOnBackdrop(event)">
+      <div id="modal-panel" class="w-full max-w-lg bg-surface-card border-t sm:border border-surface-border rounded-t-3xl sm:rounded-2xl max-h-[88vh] flex flex-col shadow-2xl sheet-anim" onclick="event.stopPropagation()">
+        <!-- Modal Body -->
+      </div>
+    </div>
+
+    <!-- Hidden File Input for JSON Restore -->
+    <input type="file" id="json-import-input" accept=".json,application/json" class="hidden" onchange="handleImportJSON(event)" />
+  </div>
+
+  <script>
+    /**
+     * CINEPLAN — MINIMALIST 4-LEVEL PRODUCTION PLANNER
+     * Hierarchy:
+     * 1. Projects (Фильмы / Сериалы)
+     * 2. Shoot Days (Запланированные съёмки внутри проекта)
+     * 3. Shoot Day View (Сцены со статусом снаружи + Свободный реквизит)
+     * 4. Scene View (Время суток, локация, хронометраж + Кадры/Сценарий)
+     */
+
+    const DB_KEY = 'cineplan_minimal_v2';
+
+    const state = {
+      projects: [],
+      level: 1, // 1: Projects | 2: Shoots | 3: ShootDay | 4: Scene
+      projectId: null,
+      shootId: null,
+      sceneId: null
+    };
+
+    const TIME_OPTIONS = ['День', 'Ночь', 'Утро', 'Вечер', 'Сумерки'];
+
+    // Utilities
+    function uid(prefix = 'id') {
+      return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    }
+
+    function esc(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function formatDateRu(isoDate) {
+      if (!isoDate) return 'Без даты';
+      try {
+        const [y, m, d] = isoDate.split('-').map(Number);
+        const dt = new Date(y, m - 1, d);
+        return dt.toLocaleDateString('ru-RU', {
+          day: 'numeric',
+          month: 'long',
+          year: 'numeric'
+        });
+      } catch {
+        return isoDate;
+      }
+    }
+
+    let toastTimeout = null;
+    function showToast(text) {
+      const el = document.getElementById('toast');
+      document.getElementById('toast-msg').textContent = text;
+      el.classList.remove('opacity-0', 'translate-y-2');
+      el.classList.add('opacity-100', 'translate-y-0');
+      clearTimeout(toastTimeout);
+      toastTimeout = setTimeout(() => {
+        el.classList.remove('opacity-100', 'translate-y-0');
+        el.classList.add('opacity-0', 'translate-y-2');
+      }, 2000);
+    }
+
+    // Storage
+    function saveDB() {
+      try {
+        localStorage.setItem(DB_KEY, JSON.stringify({ projects: state.projects }));
+      } catch (e) {
+        showToast('Ошибка сохранения');
+      }
+    }
+
+    function loadDB() {
+      try {
+        const raw = localStorage.getItem(DB_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && Array.isArray(parsed.projects)) {
+            state.projects = parsed.projects;
+            return;
+          }
+        }
+      } catch (e) {
+        console.error(e);
+      }
+      state.projects = [];
+    }
+
+    // Active Entity Getters
+    function getProject() {
+      return state.projects.find(p => p.id === state.projectId) || null;
+    }
+
+    function getShoot() {
+      const p = getProject();
+      return p ? (p.shoots || []).find(s => s.id === state.shootId) || null : null;
+    }
+
+    function getScene() {
+      const s = getShoot();
+      return s ? (s.scenes || []).find(sc => sc.id === state.sceneId) || null : null;
+    }
+
+    // Navigation
+    function goLevel1() {
+      state.level = 1;
+      state.projectId = null;
+      state.shootId = null;
+      state.sceneId = null;
+      render();
+    }
+
+    function goLevel2(projectId) {
+      state.level = 2;
+      state.projectId = projectId;
+      state.shootId = null;
+      state.sceneId = null;
+      render();
+    }
+
+    function goLevel3(shootId) {
+      state.level = 3;
+      state.shootId = shootId;
+      state.sceneId = null;
+      render();
+    }
+
+    function goLevel4(sceneId) {
+      state.level = 4;
+      state.sceneId = sceneId;
+      render();
+    }
+
+    // Modal Helpers
+    function openModal(html) {
+      document.getElementById('modal-panel').innerHTML = html;
+      document.getElementById('modal-backdrop').classList.remove('hidden');
+    }
+
+    function closeModal() {
+      document.getElementById('modal-backdrop').classList.add('hidden');
+      document.getElementById('modal-panel').innerHTML = '';
+    }
+
+    function closeModalOnBackdrop(e) {
+      if (e.target.id === 'modal-backdrop') closeModal();
+    }
+
+    // Reusable Big Centered Cross Button (for empty screens)
+    function renderBigCenterPlus(label, onClickAttr) {
+      return `
+        <div class="flex-1 flex flex-col items-center justify-center py-12 select-none fade-in">
+          <button onclick="${onClickAttr}" aria-label="${esc(label)}" class="group w-24 h-24 rounded-3xl bg-surface-card hover:bg-surface-elevated border border-surface-border hover:border-amber-500/60 flex items-center justify-center shadow-2xl active:scale-95 transition-all duration-150">
+            <svg class="w-10 h-10 text-amber-400 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+          </button>
+          <span class="mt-4 text-sm font-medium text-surface-muted">${esc(label)}</span>
+        </div>
+      `;
+    }
+
+    // Reusable Compact Plus Button (when list already has items)
+    function renderListPlusButton(label, onClickAttr) {
+      return `
+        <button onclick="${onClickAttr}" class="w-full py-3.5 rounded-2xl bg-surface-card hover:bg-surface-elevated border border-dashed border-surface-border hover:border-amber-500/60 text-amber-400 font-semibold text-sm flex items-center justify-center gap-2 active:scale-[0.99] transition">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          <span>${esc(label)}</span>
+        </button>
+      `;
+    }
+
+    // ==========================================
+    // MAIN RENDER ROUTER
+    // ==========================================
+    function render() {
+      const header = document.getElementById('app-header');
+      const main = document.getElementById('app-main');
+
+      if (state.level === 1) {
+        renderLevel1Projects(header, main);
+      } else if (state.level === 2) {
+        renderLevel2Shoots(header, main);
+      } else if (state.level === 3) {
+        renderLevel3ShootDay(header, main);
+      } else if (state.level === 4) {
+        renderLevel4Scene(header, main);
+      }
+    }
+
+    // ==========================================
+    // LEVEL 1: ГЛАВНОЕ МЕНЮ (ПРОЕКТЫ)
+    // ==========================================
+    function renderLevel1Projects(header, main) {
+      header.innerHTML = `
+        <div class="flex items-center gap-2">
+          <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+          <h1 class="text-base font-bold tracking-tight text-white">Проекты</h1>
+        </div>
+
+        <button onclick="openBackupModal()" title="Резервная копия JSON (ПК ↔ Телефон)" class="p-2 rounded-xl text-surface-muted hover:text-white hover:bg-surface-elevated transition">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+        </button>
+      `;
+
+      if (state.projects.length === 0) {
+        main.innerHTML = renderBigCenterPlus('Создать фильм / сериал', 'openCreateProjectModal()');
+        return;
+      }
+
+      const cardsHtml = state.projects.map(proj => {
+        const shootsCount = (proj.shoots || []).length;
+        const scenesCount = (proj.shoots || []).reduce((acc, s) => acc + (s.scenes || []).length, 0);
+
+        return `
+          <div onclick="goLevel2('${proj.id}')" class="bg-surface-card hover:bg-surface-elevated border border-surface-border hover:border-amber-500/40 rounded-2xl p-4 flex items-center justify-between gap-3 cursor-pointer active:scale-[0.99] transition fade-in">
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2">
+                <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-amber-500/15 text-amber-400">
+                  ${esc(proj.type || 'Фильм')}
+                </span>
+              </div>
+              <h2 class="text-base font-bold text-white truncate mt-1.5">${esc(proj.title)}</h2>
+              <p class="text-xs text-surface-muted mt-1">
+                Съёмок: ${shootsCount} • Сцен: ${scenesCount}
+              </p>
+            </div>
+
+            <div class="flex items-center gap-1 shrink-0">
+              <button onclick="event.stopPropagation(); openDeleteConfirm('project', '${proj.id}', '${esc(proj.title)}')" class="p-2 rounded-xl text-surface-muted hover:text-rose-400 hover:bg-rose-500/10 transition" title="Удалить">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                  <polyline points="3 6 5 6 21 6"></polyline>
+                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                </svg>
+              </button>
+              <svg class="w-5 h-5 text-surface-muted" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <polyline points="9 18 15 12 9 6"></polyline>
+              </svg>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      main.innerHTML = `
+        <div class="space-y-3">
+          ${cardsHtml}
+          <div class="pt-1">
+            ${renderListPlusButton('Создать фильм / сериал', 'openCreateProjectModal()')}
+          </div>
+        </div>
+      `;
+    }
+
+    // ==========================================
+    // LEVEL 2: ВНУТРИ ФИЛЬМА (ЗАПЛАНИРОВАННЫЕ СЪЁМКИ)
+    // ==========================================
+    function renderLevel2Shoots(header, main) {
+      const proj = getProject();
+      if (!proj) return goLevel1();
+
+      header.innerHTML = `
+        <button onclick="goLevel1()" class="flex items-center gap-1 text-sm font-semibold text-amber-400 hover:text-amber-300 py-1.5 pr-2 active:scale-95 transition shrink-0">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+            <polyline points="15 18 9 12 15 6"></polyline>
+          </svg>
+          <span>Назад</span>
+        </button>
+
+        <h1 class="text-sm font-bold text-white truncate text-center flex-1">${esc(proj.title)}</h1>
+
+        <div class="w-14 shrink-0"></div>
+      `;
+
+      const shoots = [...(proj.shoots || [])].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+
+      if (shoots.length === 0) {
+        main.innerHTML = renderBigCenterPlus('Запланировать съёмку', 'openCreateShootModal()');
+        return;
+      }
+
+      const shootsHtml = shoots.map(shoot => {
+        const scenes = shoot.scenes || [];
+        const doneCount = scenes.filter(sc => sc.done).length;
+
+        return `
+          <div onclick="goLevel3('${shoot.id}')" class="bg-surface-card hover:bg-surface-elevated border border-surface-border hover:border-amber-500/40 rounded-2xl p-4 flex items-center justify-between gap-3 cursor-pointer active:scale-[0.99] transition fade-in">
+            <div class="min-w-0 flex-1">
+              <span class="text-xs font-semibold text-amber-400">
+                ${formatDateRu(shoot.date)}
+              </span>
+              <h2 class="text-base font-bold text-white truncate mt-1">${esc(shoot.title)}</h2>
+              <p class="text-xs text-surface-muted mt-1">
+                Сцен: ${scenes.length} ${scenes.length > 0 ? `(снято ${doneCount} из ${scenes.length})` : ''}
+              </p>
+            </div>
+
+            <div class="flex items-center gap-1 shrink-0">
+              <button onclick="event.stopPropagation(); openDeleteConfirm('shoot', '${shoot.id}', '${esc(shoot.title)}')" class="p-2 rounded-xl text-surface-muted hover:text-rose-400 hover:bg-rose-500/10 transition" title="Удалить">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                  <polyline points="3 6 5 6 21 6"></polyline>
+                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                </svg>
+              </button>
+              <svg class="w-5 h-5 text-surface-muted" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <polyline points="9 18 15 12 9 6"></polyline>
+              </svg>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      main.innerHTML = `
+        <div class="space-y-3">
+          ${shootsHtml}
+          <div class="pt-1">
+            ${renderListPlusButton('Запланировать съёмку', 'openCreateShootModal()')}
+          </div>
+        </div>
+      `;
+    }
+
+    // ==========================================
+    // LEVEL 3: ВНУТРИ СЪЁМОЧНОГО ДНЯ (СЦЕНЫ + РЕКВИЗИТ)
+    // ==========================================
+    function renderLevel3ShootDay(header, main) {
+      const proj = getProject();
+      const shoot = getShoot();
+      if (!proj || !shoot) return goLevel2(proj?.id);
+
+      header.innerHTML = `
+        <button onclick="goLevel2('${proj.id}')" class="flex items-center gap-1 text-sm font-semibold text-amber-400 hover:text-amber-300 py-1.5 pr-2 active:scale-95 transition shrink-0">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+            <polyline points="15 18 9 12 15 6"></polyline>
+          </svg>
+          <span>Назад</span>
+        </button>
+
+        <div class="min-w-0 flex-1 text-center">
+          <h1 class="text-sm font-bold text-white truncate">${esc(shoot.title)}</h1>
+          <p class="text-[11px] text-amber-400 leading-tight">${formatDateRu(shoot.date)}</p>
+        </div>
+
+        <div class="w-14 shrink-0"></div>
+      `;
+
+      const scenes = shoot.scenes || [];
+      const props = shoot.props || [];
+
+      // If both scenes and props are empty, show the clean centered "+" for creating a scene first, plus subtle prop action below
+      if (scenes.length === 0 && props.length === 0) {
+        main.innerHTML = `
+          ${renderBigCenterPlus('Создать сцену', 'openCreateSceneModal()')}
+          <div class="pt-2">
+            <button onclick="openAddPropModal()" class="w-full py-3 rounded-2xl bg-surface-card hover:bg-surface-elevated border border-surface-border text-xs font-semibold text-surface-muted hover:text-gray-200 transition">
+              + Добавить реквизит на этот день
+            </button>
+          </div>
+        `;
+        return;
+      }
+
+      // Scenes Block
+      const scenesSectionHtml = scenes.length === 0
+        ? renderListPlusButton('Создать сцену', 'openCreateSceneModal()')
+        : `
+          <div class="space-y-2.5">
+            ${scenes.map((sc, index) => {
+              const shotsCount = (sc.shots || []).length;
+              const metaParts = [
+                sc.timeOfDay ? sc.timeOfDay : null,
+                sc.location ? sc.location : null,
+                sc.duration ? `⏱ ${sc.duration}` : null
+              ].filter(Boolean);
+
+              return `
+                <div onclick="goLevel4('${sc.id}')" class="bg-surface-card hover:bg-surface-elevated border ${sc.done ? 'border-emerald-500/35' : 'border-surface-border'} rounded-2xl p-3.5 flex items-center justify-between gap-3 cursor-pointer active:scale-[0.99] transition fade-in">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs font-bold text-surface-muted">#${index + 1}</span>
+                      <h3 class="text-base font-bold truncate ${sc.done ? 'text-gray-400 line-through' : 'text-white'}">
+                        ${esc(sc.title)}
+                      </h3>
+                    </div>
+
+                    ${metaParts.length > 0 ? `
+                      <p class="text-xs text-surface-muted truncate mt-1">
+                        ${esc(metaParts.join(' • '))}
+                      </p>
+                    ` : ''}
+
+                    <p class="text-[11px] text-surface-muted/80 mt-1">
+                      Кадров: ${shotsCount}
+                    </p>
+                  </div>
+
+                  <!-- OUTSIDE STATUS TOGGLE (Снято / Не снято) -->
+                  <div class="flex items-center gap-1.5 shrink-0" onclick="event.stopPropagation()">
+                    <button
+                      onclick="toggleSceneDone('${sc.id}')"
+                      class="px-3 py-2 rounded-xl text-xs font-bold border transition active:scale-95 ${
+                        sc.done
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                          : 'bg-surface-bg text-surface-muted border-surface-border hover:text-white'
+                      }"
+                    >
+                      ${sc.done ? '✓ Снято' : 'Не снято'}
+                    </button>
+
+                    <button onclick="openDeleteConfirm('scene', '${sc.id}', '${esc(sc.title)}')" class="p-2 rounded-xl text-surface-muted hover:text-rose-400 hover:bg-rose-500/10 transition" title="Удалить сцену">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <polyline points="3 6 5 6 21 6"></polyline>
+                        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+
+            ${renderListPlusButton('Создать сцену', 'openCreateSceneModal()')}
+          </div>
+        `;
+
+      // Props / Items Block (Реквизит)
+      const propsSectionHtml = `
+        <div class="pt-5 space-y-2.5">
+          <div class="flex items-center justify-between px-1">
+            <h2 class="text-xs font-bold uppercase tracking-wider text-surface-muted">
+              Реквизит и предметы (${props.length})
+            </h2>
+            <button onclick="openAddPropModal()" class="text-xs font-bold text-amber-400 hover:text-amber-300 py-1 px-2.5 rounded-lg bg-amber-500/10 active:scale-95 transition">
+              + Добавить
+            </button>
+          </div>
+
+          ${props.length === 0 ? `
+            <button onclick="openAddPropModal()" class="w-full py-3 rounded-2xl bg-surface-card/60 hover:bg-surface-card border border-dashed border-surface-border text-xs text-surface-muted hover:text-gray-200 transition">
+              + Добавить любой реквизит или предмет
+            </button>
+          ` : `
+            <div class="bg-surface-card border border-surface-border rounded-2xl divide-y divide-surface-border/70 overflow-hidden">
+              ${props.map(item => `
+                <div class="p-3 flex items-center justify-between gap-2.5">
+                  <button onclick="togglePropPacked('${item.id}')" class="flex items-center gap-3 min-w-0 flex-1 text-left">
+                    <div class="w-5 h-5 rounded-md border flex items-center justify-center shrink-0 transition ${item.packed ? 'bg-emerald-500 border-emerald-500 text-black' : 'border-surface-muted/60 bg-surface-bg'}">
+                      ${item.packed ? `<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>` : ''}
+                    </div>
+                    <span class="text-sm font-medium truncate ${item.packed ? 'line-through text-surface-muted' : 'text-white'}">
+                      ${esc(item.name)}
+                    </span>
+                  </button>
+
+                  <div class="flex items-center gap-1 shrink-0">
+                    <button onclick="changePropQty('${item.id}', -1)" class="w-7 h-7 rounded-lg bg-surface-bg hover:bg-surface-elevated border border-surface-border text-gray-300 font-bold text-xs flex items-center justify-center">−</button>
+                    <span class="w-7 text-center text-xs font-bold text-amber-400">${item.qty || 1}</span>
+                    <button onclick="changePropQty('${item.id}', 1)" class="w-7 h-7 rounded-lg bg-surface-bg hover:bg-surface-elevated border border-surface-border text-gray-300 font-bold text-xs flex items-center justify-center">+</button>
+                    <button onclick="deleteProp('${item.id}')" class="ml-1 p-1.5 rounded-lg text-surface-muted hover:text-rose-400" title="Удалить">✕</button>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          `}
+        </div>
+      `;
+
+      main.innerHTML = `
+        <div class="space-y-2">
+          <div class="px-1">
+            <h2 class="text-xs font-bold uppercase tracking-wider text-surface-muted">
+              Сцены (${scenes.length})
+            </h2>
+          </div>
+          ${scenesSectionHtml}
+        </div>
+        ${propsSectionHtml}
+      `;
+    }
+
+    // ==========================================
+    // LEVEL 4: ВНУТРИ СЦЕНЫ (ПАРАМЕТРЫ + КАДРЫ)
+    // ==========================================
+    function renderLevel4Scene(header, main) {
+      const proj = getProject();
+      const shoot = getShoot();
+      const scene = getScene();
+      if (!proj || !shoot || !scene) return goLevel3(shoot?.id);
+
+      header.innerHTML = `
+        <button onclick="goLevel3('${shoot.id}')" class="flex items-center gap-1 text-sm font-semibold text-amber-400 hover:text-amber-300 py-1.5 pr-2 active:scale-95 transition shrink-0">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+            <polyline points="15 18 9 12 15 6"></polyline>
+          </svg>
+          <span>Назад</span>
+        </button>
+
+        <h1 class="text-sm font-bold text-white truncate text-center flex-1">${esc(scene.title)}</h1>
+
+        <div class="w-14 shrink-0"></div>
+      `;
+
+      const shots = scene.shots || [];
+
+      const settingsCard = `
+        <div class="bg-surface-card border border-surface-border rounded-2xl p-4 space-y-3.5 fade-in">
+          <!-- Время суток -->
+          <div>
+            <label class="block text-[11px] font-bold uppercase tracking-wider text-surface-muted mb-1.5">Время суток</label>
+            <div class="flex flex-wrap gap-1.5">
+              ${TIME_OPTIONS.map(t => {
+                const active = scene.timeOfDay === t;
+                return `
+                  <button
+                    type="button"
+                    onclick="updateSceneField('timeOfDay', '${t}')"
+                    class="px-3 py-1.5 rounded-xl text-xs font-semibold border transition ${
+                      active
+                        ? 'bg-amber-500 text-black border-amber-500'
+                        : 'bg-surface-bg text-gray-300 border-surface-border hover:border-gray-600'
+                    }"
+                  >
+                    ${t}
+                  </button>
+                `;
+              }).join('')}
+            </div>
+          </div>
+
+          <!-- Локация и Хронометраж -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-[11px] font-bold uppercase tracking-wider text-surface-muted mb-1">Локация</label>
+              <input
+                type="text"
+                value="${esc(scene.location || '')}"
+                oninput="updateSceneField('location', this.value)"
+                placeholder="Например: Ночной парк"
+                class="w-full bg-surface-bg border border-surface-border focus:border-amber-500 rounded-xl px-3 py-2.5 text-sm text-white placeholder-zinc-600 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label class="block text-[11px] font-bold uppercase tracking-wider text-surface-muted mb-1">Примерный хронометраж</label>
+              <input
+                type="text"
+                value="${esc(scene.duration || '')}"
+                oninput="updateSceneField('duration', this.value)"
+                placeholder="Например: 01:30 или 45 сек"
+                class="w-full bg-surface-bg border border-surface-border focus:border-amber-500 rounded-xl px-3 py-2.5 text-sm text-white placeholder-zinc-600 focus:outline-none"
+              />
+            </div>
+          </div>
+        </div>
+      `;
+
+      if (shots.length === 0) {
+        main.innerHTML = `
+          ${settingsCard}
+          ${renderBigCenterPlus('Создать кадр', 'addShotToScene()')}
+        `;
+        return;
+      }
+
+      const shotsHtml = shots.map((shot, idx) => `
+        <div class="bg-surface-card border border-surface-border rounded-2xl p-4 space-y-2.5 fade-in">
+          <div class="flex items-center justify-between">
+            <span class="px-2.5 py-0.5 rounded-lg bg-amber-500/15 text-amber-400 text-xs font-extrabold">
+              Кадр ${idx + 1}
+            </span>
+
+            <div class="flex items-center gap-1">
+              ${idx > 0 ? `
+                <button onclick="moveShot(${idx}, -1)" class="p-1.5 rounded-lg text-surface-muted hover:text-white hover:bg-surface-elevated" title="Выше">↑</button>
+              ` : ''}
+              ${idx < shots.length - 1 ? `
+                <button onclick="moveShot(${idx}, 1)" class="p-1.5 rounded-lg text-surface-muted hover:text-white hover:bg-surface-elevated" title="Ниже">↓</button>
+              ` : ''}
+              <button onclick="deleteShot('${shot.id}')" class="p-1.5 rounded-lg text-surface-muted hover:text-rose-400 hover:bg-rose-500/10" title="Удалить кадр">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                  <polyline points="3 6 5 6 21 6"></polyline>
+                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <textarea
+            rows="3"
+            oninput="updateShotDesc('${shot.id}', this.value)"
+            placeholder="Опишите, что происходит в кадре (сценарий кадра, движение, реплики)..."
+            class="w-full bg-surface-bg border border-surface-border focus:border-amber-500 rounded-xl p-3 text-sm text-white placeholder-zinc-600 focus:outline-none leading-relaxed"
+          >${esc(shot.desc || '')}</textarea>
+        </div>
+      `).join('');
+
+      main.innerHTML = `
+        ${settingsCard}
+
+        <div class="pt-4 space-y-3">
+          <div class="px-1">
+            <h2 class="text-xs font-bold uppercase tracking-wider text-surface-muted">
+              Кадры (${shots.length})
+            </h2>
+          </div>
+
+          ${shotsHtml}
+
+          ${renderListPlusButton('Создать кадр', 'addShotToScene()')}
+        </div>
+      `;
+    }
+
+    // ==========================================
+    // MODALS & MUTATIONS
+    // ==========================================
+
+    // 1. Create Project (Фильм / Сериал)
+    function openCreateProjectModal() {
+      openModal(`
+        <div class="p-5 space-y-4">
+          <div class="flex items-center justify-between">
+            <h3 class="text-base font-bold text-white">Новый проект</h3>
+            <button onclick="closeModal()" class="p-1.5 text-surface-muted hover:text-white">✕</button>
+          </div>
+
+          <form onsubmit="submitCreateProject(event)" class="space-y-3.5">
+            <div class="grid grid-cols-2 gap-2">
+              <label class="cursor-pointer">
+                <input type="radio" name="proj-type" value="Фильм" checked class="peer hidden" />
+                <div class="py-2.5 text-center rounded-xl border border-surface-border bg-surface-bg peer-checked:bg-amber-500 peer-checked:text-black peer-checked:border-amber-500 text-xs font-bold text-gray-300 transition">
+                  Фильм
+                </div>
+              </label>
+              <label class="cursor-pointer">
+                <input type="radio" name="proj-type" value="Сериал" class="peer hidden" />
+                <div class="py-2.5 text-center rounded-xl border border-surface-border bg-surface-bg peer-checked:bg-amber-500 peer-checked:text-black peer-checked:border-amber-500 text-xs font-bold text-gray-300 transition">
+                  Сериал
+                </div>
+              </label>
+            </div>
+
+            <div>
+              <input id="new-proj-title" type="text" required placeholder="Название фильма или сериала..." class="w-full bg-surface-bg border border-surface-border focus:border-amber-500 rounded-xl px-3.5 py-3 text-sm text-white placeholder-zinc-600 focus:outline-none" />
+            </div>
+
+            <button type="submit" class="w-full py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-bold text-sm active:scale-[0.99] transition">
+              Создать
+            </button>
+          </form>
+        </div>
+      `);
+      setTimeout(() => document.getElementById('new-proj-title')?.focus(), 80);
+    }
+
+    function submitCreateProject(e) {
+      e.preventDefault();
+      const title = document.getElementById('new-proj-title').value.trim();
+      const type = document.querySelector('input[name="proj-type"]:checked')?.value || 'Фильм';
+      if (!title) return;
+
+      const proj = {
+        id: uid('proj'),
+        type,
+        title,
+        shoots: []
+      };
+
+      state.projects.unshift(proj);
+      saveDB();
+      closeModal();
+      goLevel2(proj.id);
+    }
+
+    // 2. Create Shoot Day (Запланировать съёмку)
+    function openCreateShootModal() {
+      const today = new Date().toISOString().split('T')[0];
+
+      openModal(`
+        <div class="p-5 space-y-4">
+          <div class="flex items-center justify-between">
+            <h3 class="text-base font-bold text-white">Запланировать съёмку</h3>
+            <button onclick="closeModal()" class="p-1.5 text-surface-muted hover:text-white">✕</button>
+          </div>
+
+          <form onsubmit="submitCreateShoot(event)" class="space-y-3.5">
+            <div>
+              <label class="block text-xs font-semibold text-surface-muted mb-1">Название съёмочного дня</label>
+              <input id="new-shoot-title" type="text" required placeholder="Например: День 1 — Ночной город" class="w-full bg-surface-bg border border-surface-border focus:border-amber-500 rounded-xl px-3.5 py-3 text-sm text-white placeholder-zinc-600 focus:outline-none" />
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-surface-muted mb-1">Дата</label>
+              <input id="new-shoot-date" type="date" required value="${today}" class="w-full bg-surface-bg border border-surface-border focus:border-amber-500 rounded-xl px-3.5 py-3 text-sm text-white focus:outline-none" />
+            </div>
+
+            <button type="submit" class="w-full py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-bold text-sm active:scale-[0.99] transition">
+              Создать
+            </button>
+          </form>
+        </div>
+      `);
+      setTimeout(() => document.getElementById('new-shoot-title')?.focus(), 80);
+    }
+
+    function submitCreateShoot(e) {
+      e.preventDefault();
+      const proj = getProject();
+      if (!proj) return;
+
+      const title = document.getElementById('new-shoot-title').value.trim();
+      const date = document.getElementById('new-shoot-date').value;
+      if (!title) return;
+
+      const shoot = {
+        id: uid('shoot'),
+        title,
+        date,
+        scenes: [],
+        props: []
+      };
+
+      if (!proj.shoots) proj.shoots = [];
+      proj.shoots.push(shoot);
+      saveDB();
+      closeModal();
+      goLevel3(shoot.id);
+    }
+
+    // 3. Create Scene (Создать сцену)
+    function openCreateSceneModal() {
+      openModal(`
+        <div class="p-5 space-y-4">
+          <div class="flex items-center justify-between">
+            <h3 class="text-base font-bold text-white">Новая сцена</h3>
+            <button onclick="closeModal()" class="p-1.5 text-surface-muted hover:text-white">✕</button>
+          </div>
+
+          <form onsubmit="submitCreateScene(event)" class="space-y-3.5">
+            <div>
+              <input id="new-scene-title" type="text" required placeholder="Название сцены..." class="w-full bg-surface-bg border border-surface-border focus:border-amber-500 rounded-xl px-3.5 py-3 text-sm text-white placeholder-zinc-600 focus:outline-none" />
+            </div>
+
+            <button type="submit" class="w-full py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-bold text-sm active:scale-[0.99] transition">
+              Создать
+            </button>
+          </form>
+        </div>
+      `);
+      setTimeout(() => document.getElementById('new-scene-title')?.focus(), 80);
+    }
+
+    function submitCreateScene(e) {
+      e.preventDefault();
+      const shoot = getShoot();
+      if (!shoot) return;
+
+      const title = document.getElementById('new-scene-title').value.trim();
+      if (!title) return;
+
+      const scene = {
+        id: uid('sc'),
+        title,
+        timeOfDay: 'День',
+        location: '',
+        duration: '',
+        done: false,
+        shots: []
+      };
+
+      if (!shoot.scenes) shoot.scenes = [];
+      shoot.scenes.push(scene);
+      saveDB();
+      closeModal();
+      render();
+    }
+
+    // Toggle Scene Status (Снято / Не снято) directly from outside
+    function toggleSceneDone(sceneId) {
+      const shoot = getShoot();
+      const sc = shoot?.scenes?.find(s => s.id === sceneId);
+      if (!sc) return;
+      sc.done = !sc.done;
+      saveDB();
+      render();
+    }
+
+    // 4. Add Prop / Item (Реквизит на съёмочный день)
+    function openAddPropModal() {
+      openModal(`
+        <div class="p-5 space-y-4">
+          <div class="flex items-center justify-between">
+            <h3 class="text-base font-bold text-white">Добавить реквизит</h3>
+            <button onclick="closeModal()" class="p-1.5 text-surface-muted hover:text-white">✕</button>
+          </div>
+
+          <form onsubmit="submitAddProp(event)" class="space-y-3.5">
+            <div>
+              <label class="block text-xs font-semibold text-surface-muted mb-1">Название предмета</label>
+              <input id="new-prop-name" type="text" required placeholder="Например: Фонарик, рация, чемодан..." class="w-full bg-surface-bg border border-surface-border focus:border-amber-500 rounded-xl px-3.5 py-3 text-sm text-white placeholder-zinc-600 focus:outline-none" />
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-surface-muted mb-1">Количество</label>
+              <input id="new-prop-qty" type="number" min="1" max="999" value="1" class="w-full bg-surface-bg border border-surface-border focus:border-amber-500 rounded-xl px-3.5 py-3 text-sm text-white font-bold focus:outline-none" />
+            </div>
+
+            <button type="submit" class="w-full py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-bold text-sm active:scale-[0.99] transition">
+              Добавить
+            </button>
+          </form>
+        </div>
+      `);
+      setTimeout(() => document.getElementById('new-prop-name')?.focus(), 80);
+    }
+
+    function submitAddProp(e) {
+      e.preventDefault();
+      const shoot = getShoot();
+      if (!shoot) return;
+
+      const name = document.getElementById('new-prop-name').value.trim();
+      const qty = Math.max(1, parseInt(document.getElementById('new-prop-qty').value, 10) || 1);
+      if (!name) return;
+
+      if (!shoot.props) shoot.props = [];
+      shoot.props.push({
+        id: uid('prop'),
+        name,
+        qty,
+        packed: false
+      });
+
+      saveDB();
+      closeModal();
+      render();
+    }
+
+    function togglePropPacked(propId) {
+      const shoot = getShoot();
+      const item = shoot?.props?.find(p => p.id === propId);
+      if (!item) return;
+      item.packed = !item.packed;
+      saveDB();
+      render();
+    }
+
+    function changePropQty(propId, delta) {
+      const shoot = getShoot();
+      const item = shoot?.props?.find(p => p.id === propId);
+      if (!item) return;
+      item.qty = Math.max(1, (Number(item.qty) || 1) + delta);
+      saveDB();
+      render();
+    }
+
+    function deleteProp(propId) {
+      const shoot = getShoot();
+      if (!shoot) return;
+      shoot.props = (shoot.props || []).filter(p => p.id !== propId);
+      saveDB();
+      render();
+    }
+
+    // 5. Scene Details & Shots (Level 4)
+    function updateSceneField(field, value) {
+      const scene = getScene();
+      if (!scene) return;
+      scene[field] = value;
+      saveDB();
+      if (field === 'timeOfDay') {
+        render();
+      }
+    }
+
+    function addShotToScene() {
+      const scene = getScene();
+      if (!scene) return;
+      if (!scene.shots) scene.shots = [];
+
+      const newShot = {
+        id: uid('shot'),
+        desc: ''
+      };
+      scene.shots.push(newShot);
+      saveDB();
+      render();
+
+      // Focus the newly created shot textarea
+      setTimeout(() => {
+        const textareas = document.querySelectorAll('textarea');
+        if (textareas.length > 0) {
+          textareas[textareas.length - 1].focus();
+        }
+      }, 50);
+    }
+
+    function updateShotDesc(shotId, value) {
+      const scene = getScene();
+      const shot = scene?.shots?.find(s => s.id === shotId);
+      if (!shot) return;
+      shot.desc = value;
+      saveDB();
+    }
+
+    function deleteShot(shotId) {
+      const scene = getScene();
+      if (!scene) return;
+      scene.shots = (scene.shots || []).filter(s => s.id !== shotId);
+      saveDB();
+      render();
+    }
+
+    function moveShot(index, direction) {
+      const scene = getScene();
+      if (!scene || !scene.shots) return;
+      const target = index + direction;
+      if (target < 0 || target >= scene.shots.length) return;
+      const temp = scene.shots[index];
+      scene.shots[index] = scene.shots[target];
+      scene.shots[target] = temp;
+      saveDB();
+      render();
+    }
+
+    // 6. Clean Delete Confirmation Modal (No browser confirm())
+    function openDeleteConfirm(type, id, name) {
+      const labels = {
+        project: 'Удалить проект',
+        shoot: 'Удалить съёмочный день',
+        scene: 'Удалить сцену'
+      };
+
+      openModal(`
+        <div class="p-5 space-y-4">
+          <h3 class="text-base font-bold text-white">${labels[type] || 'Удалить'}?</h3>
+          <p class="text-xs text-surface-muted leading-relaxed">
+            «${esc(name)}» будет удалено без возможности восстановления.
+          </p>
+          <div class="grid grid-cols-2 gap-2.5 pt-1">
+            <button onclick="closeModal()" class="py-3 rounded-xl bg-surface-elevated text-gray-200 font-semibold text-xs">
+              Отмена
+            </button>
+            <button onclick="executeDelete('${type}', '${id}')" class="py-3 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs">
+              Удалить
+            </button>
+          </div>
+        </div>
+      `);
+    }
+
+    function executeDelete(type, id) {
+      if (type === 'project') {
+        state.projects = state.projects.filter(p => p.id !== id);
+      } else if (type === 'shoot') {
+        const proj = getProject();
+        if (proj) proj.shoots = (proj.shoots || []).filter(s => s.id !== id);
+      } else if (type === 'scene') {
+        const shoot = getShoot();
+        if (shoot) shoot.scenes = (shoot.scenes || []).filter(sc => sc.id !== id);
+      }
+      saveDB();
+      closeModal();
+      showToast('Удалено');
+      render();
+    }
+
+    // 7. JSON Backup / Restore (PC <-> Phone)
+    function openBackupModal() {
+      openModal(`
+        <div class="p-5 space-y-4">
+          <div class="flex items-center justify-between">
+            <h3 class="text-base font-bold text-white">Перенос данных (JSON)</h3>
+            <button onclick="closeModal()" class="p-1.5 text-surface-muted hover:text-white">✕</button>
+          </div>
+
+          <p class="text-xs text-surface-muted leading-relaxed">
+            Сохраните файл на компьютере и откройте его на телефоне, чтобы перенести все фильмы, сцены и кадры.
+          </p>
+
+          <div class="space-y-2.5">
+            <button onclick="exportJSON()" class="w-full py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-bold text-xs">
+              Скачать резервную копию (.json)
+            </button>
+            <button onclick="document.getElementById('json-import-input').click()" class="w-full py-3.5 rounded-xl bg-surface-elevated border border-surface-border text-white font-bold text-xs">
+              Загрузить из файла (.json)
+            </button>
+          </div>
+        </div>
+      `);
+    }
+
+    function exportJSON() {
+      const data = JSON.stringify({ version: 2, projects: state.projects }, null, 2);
+      const blob = new Blob([data], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `cineplan_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      closeModal();
+      showToast('Файл сохранён');
+    }
+
+    function handleImportJSON(e) {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const parsed = JSON.parse(ev.target.result);
+          if (!parsed || !Array.isArray(parsed.projects)) throw new Error();
+          state.projects = parsed.projects;
+          saveDB();
+          closeModal();
+          showToast('Проекты загружены');
+          goLevel1();
+        } catch {
+          showToast('Неверный формат файла');
+        } finally {
+          e.target.value = '';
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    // Start App
+    window.addEventListener('DOMContentLoaded', () => {
+      loadDB();
+      render();
+    });
+  </script>
+</body>
+</html>

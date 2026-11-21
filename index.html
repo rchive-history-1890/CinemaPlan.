@@ -124,10 +124,44 @@
       level: 1, // 1: Projects | 2: Shoots | 3: ShootDay | 4: Scene
       projectId: null,
       shootId: null,
-      sceneId: null
+      sceneId: null,
+      exited: false
     };
 
     const TIME_OPTIONS = ['День', 'Ночь', 'Утро', 'Вечер', 'Сумерки'];
+    const SCENE_STATUSES = [
+      { id: 'not_shot', label: 'Не снято' },
+      { id: 'in_progress', label: 'В процессе' },
+      { id: 'planned', label: 'В планах' },
+      { id: 'shot', label: 'Снято' }
+    ];
+
+    // Normalize scene status for backward compatibility with legacy boolean `done`
+    function getSceneStatus(scene) {
+      if (!scene) return 'not_shot';
+      if (scene.status && SCENE_STATUSES.some(s => s.id === scene.status)) {
+        return scene.status;
+      }
+      return scene.done ? 'shot' : 'not_shot';
+    }
+
+    function getSceneStatusMeta(statusId) {
+      return SCENE_STATUSES.find(s => s.id === statusId) || SCENE_STATUSES[0];
+    }
+
+    function getSceneStatusBadgeClass(statusId) {
+      switch (statusId) {
+        case 'shot':
+          return 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40';
+        case 'in_progress':
+          return 'bg-amber-500/20 text-amber-300 border-amber-500/40';
+        case 'planned':
+          return 'bg-sky-500/20 text-sky-300 border-sky-500/40';
+        case 'not_shot':
+        default:
+          return 'bg-surface-bg text-surface-muted border-surface-border hover:text-white';
+      }
+    }
 
     // Utilities
     function uid(prefix = 'id') {
@@ -144,11 +178,14 @@
         .replace(/'/g, '&#39;');
     }
 
-    function formatDateRu(isoDate) {
-      if (!isoDate) return 'Без даты';
+    function formatDateRu(isoDate, unscheduled = false) {
+      if (unscheduled || !isoDate || isoDate === 'unscheduled') {
+        return 'Ещё не запланировано';
+      }
       try {
         const [y, m, d] = isoDate.split('-').map(Number);
         const dt = new Date(y, m - 1, d);
+        if (Number.isNaN(dt.getTime())) return 'Ещё не запланировано';
         return dt.toLocaleDateString('ru-RU', {
           day: 'numeric',
           month: 'long',
@@ -157,6 +194,10 @@
       } catch {
         return isoDate;
       }
+    }
+
+    function isShootUnscheduled(shoot) {
+      return Boolean(shoot && (shoot.unscheduled || !shoot.date || shoot.date === 'unscheduled'));
     }
 
     let toastTimeout = null;
@@ -214,6 +255,7 @@
 
     // Navigation
     function goLevel1() {
+      state.exited = false;
       state.level = 1;
       state.projectId = null;
       state.shootId = null;
@@ -222,6 +264,7 @@
     }
 
     function goLevel2(projectId) {
+      state.exited = false;
       state.level = 2;
       state.projectId = projectId;
       state.shootId = null;
@@ -230,6 +273,7 @@
     }
 
     function goLevel3(shootId) {
+      state.exited = false;
       state.level = 3;
       state.shootId = shootId;
       state.sceneId = null;
@@ -237,9 +281,77 @@
     }
 
     function goLevel4(sceneId) {
+      state.exited = false;
       state.level = 4;
       state.sceneId = sceneId;
       render();
+    }
+
+    // Exit App Handler (tries window.close(), falls back to clean exit view)
+    function exitApp() {
+      closeModal();
+      state.exited = true;
+      render();
+      try {
+        window.close();
+      } catch (_) {
+        // Fallback screen remains visible when window.close() is blocked by browser/WebView
+      }
+    }
+
+    function renderExitScreen(header, main) {
+      header.innerHTML = `
+        <div class="flex items-center gap-2">
+          <span class="w-2.5 h-2.5 rounded-full bg-surface-muted"></span>
+          <span class="text-sm font-bold text-white">CinePlan</span>
+        </div>
+        <button onclick="goLevel1()" class="text-xs font-semibold text-amber-400 hover:text-amber-300 px-2.5 py-1.5 rounded-xl bg-amber-500/10 transition">
+          Главное
+        </button>
+      `;
+
+      main.innerHTML = `
+        <div class="flex-1 flex flex-col items-center justify-center text-center px-4 py-12 fade-in">
+          <div class="w-16 h-16 rounded-2xl bg-surface-card border border-surface-border flex items-center justify-center mb-4 text-surface-muted">
+            <svg class="w-8 h-8" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+              <polyline points="16 17 21 12 16 7"></polyline>
+              <line x1="21" y1="12" x2="9" y2="12"></line>
+            </svg>
+          </div>
+          <h2 class="text-lg font-bold text-white">Приложение закрыто</h2>
+          <p class="text-xs text-surface-muted mt-1.5 max-w-xs leading-relaxed">
+            Вы вышли из приложения. Все ваши проекты и изменения сохранены.
+          </p>
+          <button onclick="goLevel1()" class="mt-6 px-6 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-bold text-xs active:scale-95 transition">
+            Открыть снова
+          </button>
+        </div>
+      `;
+    }
+
+    function renderHomeButton(compact = false) {
+      return `
+        <button
+          onclick="goLevel1()"
+          title="Перейти на главное меню"
+          class="${compact ? 'px-2.5 py-1.5 text-xs' : 'px-3 py-1.5 text-xs'} rounded-xl font-semibold text-gray-200 hover:text-white bg-surface-card hover:bg-surface-elevated border border-surface-border active:scale-95 transition shrink-0"
+        >
+          Главное
+        </button>
+      `;
+    }
+
+    function renderExitButton() {
+      return `
+        <button
+          onclick="exitApp()"
+          title="Выйти из приложения"
+          class="px-2.5 py-1.5 rounded-xl text-xs font-semibold text-rose-300 hover:text-rose-200 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 active:scale-95 transition shrink-0"
+        >
+          Выход
+        </button>
+      `;
     }
 
     // Modal Helpers
@@ -292,6 +404,11 @@
       const header = document.getElementById('app-header');
       const main = document.getElementById('app-main');
 
+      if (state.exited) {
+        renderExitScreen(header, main);
+        return;
+      }
+
       if (state.level === 1) {
         renderLevel1Projects(header, main);
       } else if (state.level === 2) {
@@ -308,18 +425,23 @@
     // ==========================================
     function renderLevel1Projects(header, main) {
       header.innerHTML = `
-        <div class="flex items-center gap-2">
-          <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
-          <h1 class="text-base font-bold tracking-tight text-white">Проекты</h1>
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="w-2.5 h-2.5 rounded-full bg-amber-400 shrink-0"></span>
+          <button onclick="goLevel1()" class="text-base font-bold tracking-tight text-white hover:text-amber-300 transition truncate">
+            Главное
+          </button>
         </div>
 
-        <button onclick="openBackupModal()" title="Резервная копия JSON (ПК ↔ Телефон)" class="p-2 rounded-xl text-surface-muted hover:text-white hover:bg-surface-elevated transition">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-            <polyline points="7 10 12 15 17 10"></polyline>
-            <line x1="12" y1="15" x2="12" y2="3"></line>
-          </svg>
-        </button>
+        <div class="flex items-center gap-1.5 shrink-0">
+          <button onclick="openBackupModal()" title="Резервная копия JSON (ПК ↔ Телефон)" class="p-2 rounded-xl text-surface-muted hover:text-white hover:bg-surface-elevated transition">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+          </button>
+          ${renderExitButton()}
+        </div>
       `;
 
       if (state.projects.length === 0) {
@@ -378,19 +500,29 @@
       if (!proj) return goLevel1();
 
       header.innerHTML = `
-        <button onclick="goLevel1()" class="flex items-center gap-1 text-sm font-semibold text-amber-400 hover:text-amber-300 py-1.5 pr-2 active:scale-95 transition shrink-0">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
-            <polyline points="15 18 9 12 15 6"></polyline>
-          </svg>
-          <span>Назад</span>
-        </button>
+        <div class="flex items-center gap-1 shrink-0">
+          <button onclick="goLevel1()" class="flex items-center gap-0.5 text-xs font-semibold text-amber-400 hover:text-amber-300 py-1.5 pr-1 active:scale-95 transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+              <polyline points="15 18 9 12 15 6"></polyline>
+            </svg>
+            <span>Назад</span>
+          </button>
+          ${renderHomeButton(true)}
+        </div>
 
         <h1 class="text-sm font-bold text-white truncate text-center flex-1">${esc(proj.title)}</h1>
 
-        <div class="w-14 shrink-0"></div>
+        ${renderExitButton()}
       `;
 
-      const shoots = [...(proj.shoots || [])].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      const shoots = [...(proj.shoots || [])].sort((a, b) => {
+        const aUnsched = isShootUnscheduled(a);
+        const bUnsched = isShootUnscheduled(b);
+        if (aUnsched && !bUnsched) return 1;
+        if (!aUnsched && bUnsched) return -1;
+        if (aUnsched && bUnsched) return 0;
+        return (a.date || '').localeCompare(b.date || '');
+      });
 
       if (shoots.length === 0) {
         main.innerHTML = renderBigCenterPlus('Запланировать съёмку', 'openCreateShootModal()');
@@ -399,13 +531,14 @@
 
       const shootsHtml = shoots.map(shoot => {
         const scenes = shoot.scenes || [];
-        const doneCount = scenes.filter(sc => sc.done).length;
+        const doneCount = scenes.filter(sc => getSceneStatus(sc) === 'shot').length;
+        const unsched = isShootUnscheduled(shoot);
 
         return `
           <div onclick="goLevel3('${shoot.id}')" class="bg-surface-card hover:bg-surface-elevated border border-surface-border hover:border-amber-500/40 rounded-2xl p-4 flex items-center justify-between gap-3 cursor-pointer active:scale-[0.99] transition fade-in">
             <div class="min-w-0 flex-1">
-              <span class="text-xs font-semibold text-amber-400">
-                ${formatDateRu(shoot.date)}
+              <span class="text-xs font-semibold ${unsched ? 'text-surface-muted' : 'text-amber-400'}">
+                ${formatDateRu(shoot.date, unsched)}
               </span>
               <h2 class="text-base font-bold text-white truncate mt-1">${esc(shoot.title)}</h2>
               <p class="text-xs text-surface-muted mt-1">
@@ -446,26 +579,32 @@
       const shoot = getShoot();
       if (!proj || !shoot) return goLevel2(proj?.id);
 
-      header.innerHTML = `
-        <button onclick="goLevel2('${proj.id}')" class="flex items-center gap-1 text-sm font-semibold text-amber-400 hover:text-amber-300 py-1.5 pr-2 active:scale-95 transition shrink-0">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
-            <polyline points="15 18 9 12 15 6"></polyline>
-          </svg>
-          <span>Назад</span>
-        </button>
+      const unsched = isShootUnscheduled(shoot);
 
-        <div class="min-w-0 flex-1 text-center">
-          <h1 class="text-sm font-bold text-white truncate">${esc(shoot.title)}</h1>
-          <p class="text-[11px] text-amber-400 leading-tight">${formatDateRu(shoot.date)}</p>
+      header.innerHTML = `
+        <div class="flex items-center gap-1 shrink-0">
+          <button onclick="goLevel2('${proj.id}')" class="flex items-center gap-0.5 text-xs font-semibold text-amber-400 hover:text-amber-300 py-1.5 pr-1 active:scale-95 transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+              <polyline points="15 18 9 12 15 6"></polyline>
+            </svg>
+            <span>Назад</span>
+          </button>
+          ${renderHomeButton(true)}
         </div>
 
-        <div class="w-14 shrink-0"></div>
+        <div class="min-w-0 flex-1 text-center px-1">
+          <h1 class="text-sm font-bold text-white truncate">${esc(shoot.title)}</h1>
+          <p class="text-[11px] ${unsched ? 'text-surface-muted' : 'text-amber-400'} leading-tight truncate">
+            ${formatDateRu(shoot.date, unsched)}
+          </p>
+        </div>
+
+        ${renderExitButton()}
       `;
 
       const scenes = shoot.scenes || [];
       const props = shoot.props || [];
 
-      // If both scenes and props are empty, show the clean centered "+" for creating a scene first, plus subtle prop action below
       if (scenes.length === 0 && props.length === 0) {
         main.innerHTML = `
           ${renderBigCenterPlus('Создать сцену', 'openCreateSceneModal()')}
@@ -478,13 +617,14 @@
         return;
       }
 
-      // Scenes Block
+      // Scenes Block with 4-status selector outside on the card
       const scenesSectionHtml = scenes.length === 0
         ? renderListPlusButton('Создать сцену', 'openCreateSceneModal()')
         : `
           <div class="space-y-2.5">
             ${scenes.map((sc, index) => {
               const shotsCount = (sc.shots || []).length;
+              const statusId = getSceneStatus(sc);
               const metaParts = [
                 sc.timeOfDay ? sc.timeOfDay : null,
                 sc.location ? sc.location : null,
@@ -492,45 +632,53 @@
               ].filter(Boolean);
 
               return `
-                <div onclick="goLevel4('${sc.id}')" class="bg-surface-card hover:bg-surface-elevated border ${sc.done ? 'border-emerald-500/35' : 'border-surface-border'} rounded-2xl p-3.5 flex items-center justify-between gap-3 cursor-pointer active:scale-[0.99] transition fade-in">
-                  <div class="min-w-0 flex-1">
-                    <div class="flex items-center gap-2">
-                      <span class="text-xs font-bold text-surface-muted">#${index + 1}</span>
-                      <h3 class="text-base font-bold truncate ${sc.done ? 'text-gray-400 line-through' : 'text-white'}">
-                        ${esc(sc.title)}
-                      </h3>
+                <div onclick="goLevel4('${sc.id}')" class="bg-surface-card hover:bg-surface-elevated border ${statusId === 'shot' ? 'border-emerald-500/35' : 'border-surface-border'} rounded-2xl p-3.5 flex flex-col gap-2.5 cursor-pointer active:scale-[0.99] transition fade-in">
+                  <div class="flex items-start justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                      <div class="flex items-center gap-2">
+                        <span class="text-xs font-bold text-surface-muted">#${index + 1}</span>
+                        <h3 class="text-base font-bold truncate ${statusId === 'shot' ? 'text-gray-300' : 'text-white'}">
+                          ${esc(sc.title)}
+                        </h3>
+                      </div>
+
+                      ${metaParts.length > 0 ? `
+                        <p class="text-xs text-surface-muted truncate mt-1">
+                          ${esc(metaParts.join(' • '))}
+                        </p>
+                      ` : ''}
+
+                      <p class="text-[11px] text-surface-muted/80 mt-1">
+                        Кадров: ${shotsCount}
+                      </p>
                     </div>
 
-                    ${metaParts.length > 0 ? `
-                      <p class="text-xs text-surface-muted truncate mt-1">
-                        ${esc(metaParts.join(' • '))}
-                      </p>
-                    ` : ''}
-
-                    <p class="text-[11px] text-surface-muted/80 mt-1">
-                      Кадров: ${shotsCount}
-                    </p>
-                  </div>
-
-                  <!-- OUTSIDE STATUS TOGGLE (Снято / Не снято) -->
-                  <div class="flex items-center gap-1.5 shrink-0" onclick="event.stopPropagation()">
-                    <button
-                      onclick="toggleSceneDone('${sc.id}')"
-                      class="px-3 py-2 rounded-xl text-xs font-bold border transition active:scale-95 ${
-                        sc.done
-                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                          : 'bg-surface-bg text-surface-muted border-surface-border hover:text-white'
-                      }"
-                    >
-                      ${sc.done ? '✓ Снято' : 'Не снято'}
-                    </button>
-
-                    <button onclick="openDeleteConfirm('scene', '${sc.id}', '${esc(sc.title)}')" class="p-2 rounded-xl text-surface-muted hover:text-rose-400 hover:bg-rose-500/10 transition" title="Удалить сцену">
+                    <button onclick="event.stopPropagation(); openDeleteConfirm('scene', '${sc.id}', '${esc(sc.title)}')" class="p-2 rounded-xl text-surface-muted hover:text-rose-400 hover:bg-rose-500/10 transition shrink-0" title="Удалить сцену">
                       <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                         <polyline points="3 6 5 6 21 6"></polyline>
                         <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
                       </svg>
                     </button>
+                  </div>
+
+                  <!-- OUTSIDE 4-STATE STATUS SELECTOR -->
+                  <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pt-0.5" onclick="event.stopPropagation()">
+                    ${SCENE_STATUSES.map(st => {
+                      const active = statusId === st.id;
+                      return `
+                        <button
+                          type="button"
+                          onclick="setSceneStatus('${sc.id}', '${st.id}')"
+                          class="py-1.5 px-2 rounded-xl text-[11px] font-bold border transition active:scale-95 truncate ${
+                            active
+                              ? getSceneStatusBadgeClass(st.id)
+                              : 'bg-surface-bg/80 text-surface-muted border-surface-border/70 hover:text-gray-200'
+                          }"
+                        >
+                          ${esc(st.label)}
+                        </button>
+                      `;
+                    }).join('')}
                   </div>
                 </div>
               `;
@@ -605,16 +753,19 @@
       if (!proj || !shoot || !scene) return goLevel3(shoot?.id);
 
       header.innerHTML = `
-        <button onclick="goLevel3('${shoot.id}')" class="flex items-center gap-1 text-sm font-semibold text-amber-400 hover:text-amber-300 py-1.5 pr-2 active:scale-95 transition shrink-0">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
-            <polyline points="15 18 9 12 15 6"></polyline>
-          </svg>
-          <span>Назад</span>
-        </button>
+        <div class="flex items-center gap-1 shrink-0">
+          <button onclick="goLevel3('${shoot.id}')" class="flex items-center gap-0.5 text-xs font-semibold text-amber-400 hover:text-amber-300 py-1.5 pr-1 active:scale-95 transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+              <polyline points="15 18 9 12 15 6"></polyline>
+            </svg>
+            <span>Назад</span>
+          </button>
+          ${renderHomeButton(true)}
+        </div>
 
         <h1 class="text-sm font-bold text-white truncate text-center flex-1">${esc(scene.title)}</h1>
 
-        <div class="w-14 shrink-0"></div>
+        ${renderExitButton()}
       `;
 
       const shots = scene.shots || [];
@@ -789,7 +940,7 @@
       goLevel2(proj.id);
     }
 
-    // 2. Create Shoot Day (Запланировать съёмку)
+    // 2. Create Shoot Day (Запланировать съёмку + "Ещё не запланировано")
     function openCreateShootModal() {
       const today = new Date().toISOString().split('T')[0];
 
@@ -806,9 +957,33 @@
               <input id="new-shoot-title" type="text" required placeholder="Например: День 1 — Ночной город" class="w-full bg-surface-bg border border-surface-border focus:border-amber-500 rounded-xl px-3.5 py-3 text-sm text-white placeholder-zinc-600 focus:outline-none" />
             </div>
 
-            <div>
-              <label class="block text-xs font-semibold text-surface-muted mb-1">Дата</label>
-              <input id="new-shoot-date" type="date" required value="${today}" class="w-full bg-surface-bg border border-surface-border focus:border-amber-500 rounded-xl px-3.5 py-3 text-sm text-white focus:outline-none" />
+            <div class="space-y-2">
+              <label class="block text-xs font-semibold text-surface-muted">Дата</label>
+              <div class="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  id="mode-date-btn"
+                  onclick="setShootDateMode('date')"
+                  class="py-2 px-3 rounded-xl text-xs font-bold border bg-amber-500 text-black border-amber-500 transition"
+                >
+                  Выбрать дату
+                </button>
+                <button
+                  type="button"
+                  id="mode-unsched-btn"
+                  onclick="setShootDateMode('unscheduled')"
+                  class="py-2 px-3 rounded-xl text-xs font-bold border bg-surface-bg text-gray-300 border-surface-border hover:border-gray-600 transition"
+                >
+                  Ещё не запланировано
+                </button>
+              </div>
+
+              <div id="shoot-date-input-wrap">
+                <input id="new-shoot-date" type="date" value="${today}" class="w-full bg-surface-bg border border-surface-border focus:border-amber-500 rounded-xl px-3.5 py-3 text-sm text-white focus:outline-none" />
+              </div>
+              <p id="shoot-unsched-hint" class="hidden text-xs text-surface-muted bg-surface-bg/80 border border-surface-border/70 rounded-xl px-3.5 py-2.5">
+                Съёмка будет создана без даты со статусом «Ещё не запланировано».
+              </p>
             </div>
 
             <button type="submit" class="w-full py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-bold text-sm active:scale-[0.99] transition">
@@ -820,23 +995,55 @@
       setTimeout(() => document.getElementById('new-shoot-title')?.focus(), 80);
     }
 
+    let currentShootDateMode = 'date';
+
+    function setShootDateMode(mode) {
+      currentShootDateMode = mode;
+      const dateBtn = document.getElementById('mode-date-btn');
+      const unschedBtn = document.getElementById('mode-unsched-btn');
+      const dateWrap = document.getElementById('shoot-date-input-wrap');
+      const hint = document.getElementById('shoot-unsched-hint');
+      const dateInput = document.getElementById('new-shoot-date');
+
+      if (!dateBtn || !unschedBtn || !dateWrap || !hint) return;
+
+      if (mode === 'unscheduled') {
+        unschedBtn.className = 'py-2 px-3 rounded-xl text-xs font-bold border bg-amber-500 text-black border-amber-500 transition';
+        dateBtn.className = 'py-2 px-3 rounded-xl text-xs font-bold border bg-surface-bg text-gray-300 border-surface-border hover:border-gray-600 transition';
+        dateWrap.classList.add('hidden');
+        hint.classList.remove('hidden');
+        if (dateInput) dateInput.required = false;
+      } else {
+        dateBtn.className = 'py-2 px-3 rounded-xl text-xs font-bold border bg-amber-500 text-black border-amber-500 transition';
+        unschedBtn.className = 'py-2 px-3 rounded-xl text-xs font-bold border bg-surface-bg text-gray-300 border-surface-border hover:border-gray-600 transition';
+        dateWrap.classList.remove('hidden');
+        hint.classList.add('hidden');
+        if (dateInput) dateInput.required = true;
+      }
+    }
+
     function submitCreateShoot(e) {
       e.preventDefault();
       const proj = getProject();
       if (!proj) return;
 
       const title = document.getElementById('new-shoot-title').value.trim();
-      const date = document.getElementById('new-shoot-date').value;
       if (!title) return;
+
+      const unscheduled = currentShootDateMode === 'unscheduled';
+      const rawDate = document.getElementById('new-shoot-date')?.value || '';
+      const date = unscheduled ? '' : rawDate;
 
       const shoot = {
         id: uid('shoot'),
         title,
         date,
+        unscheduled,
         scenes: [],
         props: []
       };
 
+      currentShootDateMode = 'date';
       if (!proj.shoots) proj.shoots = [];
       proj.shoots.push(shoot);
       saveDB();
@@ -881,6 +1088,7 @@
         timeOfDay: 'День',
         location: '',
         duration: '',
+        status: 'not_shot',
         done: false,
         shots: []
       };
@@ -892,12 +1100,14 @@
       render();
     }
 
-    // Toggle Scene Status (Снято / Не снято) directly from outside
-    function toggleSceneDone(sceneId) {
+    // Set Scene Status (Не снято / В процессе / В планах / Снято) directly from outside
+    function setSceneStatus(sceneId, nextStatus) {
       const shoot = getShoot();
       const sc = shoot?.scenes?.find(s => s.id === sceneId);
       if (!sc) return;
-      sc.done = !sc.done;
+      if (!SCENE_STATUSES.some(st => st.id === nextStatus)) return;
+      sc.status = nextStatus;
+      sc.done = nextStatus === 'shot';
       saveDB();
       render();
     }

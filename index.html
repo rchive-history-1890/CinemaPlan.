@@ -9,6 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="CinePlan" />
   <title>CinePlan</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -106,18 +107,25 @@
     </div>
 
     <input type="file" id="json-import-input" accept=".json,application/json" class="hidden" onchange="handleImportJSON(event)" />
+    <input type="file" id="shot-video-input" accept="video/*" class="hidden" onchange="handleShotVideoSelected(event)" />
   </div>
 
   <script>
     const DB_KEY = 'cineplan_minimal_v2';
+    const VIDEO_DB_NAME = 'cineplan_videos_idb';
+    const VIDEO_STORE_NAME = 'videos';
 
     const state = {
       projects: [],
       level: 1, // 1: Проекты | 2: Съёмки | 3: Съёмочный день | 4: Сцена
       projectId: null,
       shootId: null,
-      sceneId: null
+      sceneId: null,
+      pendingVideoShotId: null
     };
+
+    // Кэш ObjectURL для предпросмотра видео в текущей сессии
+    const videoUrlCache = new Map();
 
     const TIME_OPTIONS = ['День', 'Ночь', 'Утро', 'Вечер', 'Сумерки'];
 
@@ -160,6 +168,125 @@
       }
     ];
 
+    // ==========================================
+    // INDEXEDDB ДЛЯ ВИДЕОФАЙЛОВ
+    // ==========================================
+    function openVideoDB() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(VIDEO_DB_NAME, 1);
+        req.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains(VIDEO_STORE_NAME)) {
+            db.createObjectStore(VIDEO_STORE_NAME, { keyPath: 'id' });
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function saveVideoToIDB(videoId, file) {
+      const db = await openVideoDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(VIDEO_STORE_NAME, 'readwrite');
+        tx.objectStore(VIDEO_STORE_NAME).put({
+          id: videoId,
+          name: file.name,
+          type: file.type || 'video/mp4',
+          size: file.size,
+          blob: file
+        });
+        tx.oncomplete = () => {
+          if (videoUrlCache.has(videoId)) {
+            URL.revokeObjectURL(videoUrlCache.get(videoId));
+            videoUrlCache.delete(videoId);
+          }
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+
+    async function getVideoFromIDB(videoId) {
+      if (!videoId) return null;
+      const db = await openVideoDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(VIDEO_STORE_NAME, 'readonly');
+        const req = tx.objectStore(VIDEO_STORE_NAME).get(videoId);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function deleteVideoFromIDB(videoId) {
+      if (!videoId) return;
+      if (videoUrlCache.has(videoId)) {
+        URL.revokeObjectURL(videoUrlCache.get(videoId));
+        videoUrlCache.delete(videoId);
+      }
+      try {
+        const db = await openVideoDB();
+        await new Promise((resolve) => {
+          const tx = db.transaction(VIDEO_STORE_NAME, 'readwrite');
+          tx.objectStore(VIDEO_STORE_NAME).delete(videoId);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        });
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function hydrateShotVideoPreviews() {
+      const scene = getScene();
+      if (!scene) return;
+      for (const shot of (scene.shots || [])) {
+        if (!shot.videoId) continue;
+        const vidEl = document.getElementById(`video-preview-${shot.id}`);
+        if (!vidEl) continue;
+        try {
+          if (videoUrlCache.has(shot.videoId)) {
+            vidEl.src = videoUrlCache.get(shot.videoId);
+          } else {
+            const rec = await getVideoFromIDB(shot.videoId);
+            if (rec && rec.blob) {
+              const url = URL.createObjectURL(rec.blob);
+              videoUrlCache.set(shot.videoId, url);
+              vidEl.src = url;
+            }
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      }
+    }
+
+    function formatBytes(bytes) {
+      if (!bytes) return '';
+      if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} КБ`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`;
+    }
+
+    function sanitizePathName(name, fallback = 'Без_названия') {
+      const cleaned = String(name || '')
+        .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/^\.+|\.+$/g, '');
+      return cleaned || fallback;
+    }
+
+    function makeUniqueName(baseName, usedSet) {
+      let candidate = baseName;
+      let counter = 2;
+      while (usedSet.has(candidate.toLowerCase())) {
+        candidate = `${baseName} (${counter})`;
+        counter++;
+      }
+      usedSet.add(candidate.toLowerCase());
+      return candidate;
+    }
+
     function getSceneStatusMeta(sc) {
       const key = sc.status || (sc.done ? 'shot' : 'not_shot');
       return SCENE_STATUSES.find(s => s.key === key) || SCENE_STATUSES[0];
@@ -195,16 +322,18 @@
     }
 
     let toastTimeout = null;
-    function showToast(text) {
+    function showToast(text, persist = false) {
       const el = document.getElementById('toast');
       document.getElementById('toast-msg').textContent = text;
       el.classList.remove('opacity-0', 'translate-y-2');
       el.classList.add('opacity-100', 'translate-y-0');
       clearTimeout(toastTimeout);
-      toastTimeout = setTimeout(() => {
-        el.classList.remove('opacity-100', 'translate-y-0');
-        el.classList.add('opacity-0', 'translate-y-2');
-      }, 1800);
+      if (!persist) {
+        toastTimeout = setTimeout(() => {
+          el.classList.remove('opacity-100', 'translate-y-0');
+          el.classList.add('opacity-0', 'translate-y-2');
+        }, 2000);
+      }
     }
 
     function saveDB() {
@@ -326,8 +455,129 @@
         renderLevel3ShootDay(header, main);
       } else if (state.level === 4) {
         renderLevel4Scene(header, main);
+        hydrateShotVideoPreviews();
       }
       document.getElementById('app').scrollTop = 0;
+    }
+
+    // ==========================================
+    // ЭКСПОРТ В ZIP (СЦЕНА И ВЕСЬ ФИЛЬМ)
+    // ==========================================
+    async function populateSceneFolder(sceneFolder, sc) {
+      const shots = sc.shots || [];
+      if (shots.length === 0) {
+        const metaLines = [
+          `Сцена: ${sc.title || ''}`,
+          sc.timeOfDay ? `Время суток: ${sc.timeOfDay}` : null,
+          sc.location ? `Локация: ${sc.location}` : null,
+          sc.duration ? `Хронометраж: ${sc.duration}` : null,
+          '',
+          'Кадры ещё не добавлены.'
+        ].filter(v => v !== null);
+        sceneFolder.file('Описание_сцены.txt', metaLines.join('\n'));
+        return;
+      }
+
+      const usedShotFolders = new Set();
+
+      for (let i = 0; i < shots.length; i++) {
+        const shot = shots[i];
+        const shotFolderName = makeUniqueName(`Кадр ${i + 1}`, usedShotFolders);
+        const shotFolder = sceneFolder.folder(shotFolderName);
+
+        const txtContent = (shot.desc && shot.desc.trim().length > 0)
+          ? shot.desc
+          : 'Описание кадра не заполнено.';
+        shotFolder.file('Описание.txt', txtContent);
+
+        if (shot.videoId) {
+          const rec = await getVideoFromIDB(shot.videoId);
+          if (rec && rec.blob) {
+            const rawVideoName = rec.name || shot.videoName || `Кадр_${i + 1}.mp4`;
+            const safeVideoName = sanitizePathName(rawVideoName, `Кадр_${i + 1}.mp4`);
+            shotFolder.file(safeVideoName, rec.blob);
+          }
+        }
+      }
+    }
+
+    function triggerZipDownload(blob, fileName) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    }
+
+    async function downloadSceneBundle(sceneId) {
+      if (typeof JSZip === 'undefined') {
+        showToast('Ошибка: библиотека архива не загружена');
+        return;
+      }
+      const shoot = getShoot();
+      const sc = shoot?.scenes?.find(s => s.id === sceneId);
+      if (!sc) return;
+
+      showToast('Собираю папку сцены...', true);
+      try {
+        const zip = new JSZip();
+        const sceneFolderName = sanitizePathName(sc.title, 'Сцена');
+        const sceneFolder = zip.folder(sceneFolderName);
+
+        await populateSceneFolder(sceneFolder, sc);
+
+        const blob = await zip.generateAsync({ type: 'blob' });
+        triggerZipDownload(blob, `${sceneFolderName}.zip`);
+        showToast('Сцена скачана');
+      } catch (e) {
+        console.error(e);
+        showToast('Ошибка при скачивании сцены');
+      }
+    }
+
+    async function downloadProjectBundle(projectId) {
+      if (typeof JSZip === 'undefined') {
+        showToast('Ошибка: библиотека архива не загружена');
+        return;
+      }
+      const proj = state.projects.find(p => p.id === projectId);
+      if (!proj) return;
+
+      showToast('Собираю папку фильма...', true);
+      try {
+        const zip = new JSZip();
+        const projectFolderName = sanitizePathName(proj.title, 'Проект');
+        const projectFolder = zip.folder(projectFolderName);
+
+        const allScenes = [];
+        for (const shoot of (proj.shoots || [])) {
+          for (const sc of (shoot.scenes || [])) {
+            allScenes.push(sc);
+          }
+        }
+
+        if (allScenes.length === 0) {
+          projectFolder.file('Инфо.txt', `Проект: ${proj.title}\nСцены пока не созданы.`);
+        } else {
+          const usedSceneFolders = new Set();
+          for (const sc of allScenes) {
+            const baseSceneName = sanitizePathName(sc.title, 'Сцена');
+            const uniqueSceneName = makeUniqueName(baseSceneName, usedSceneFolders);
+            const sceneFolder = projectFolder.folder(uniqueSceneName);
+            await populateSceneFolder(sceneFolder, sc);
+          }
+        }
+
+        const blob = await zip.generateAsync({ type: 'blob' });
+        triggerZipDownload(blob, `${projectFolderName}.zip`);
+        showToast('Фильм скачан');
+      } catch (e) {
+        console.error(e);
+        showToast('Ошибка при скачивании фильма');
+      }
     }
 
     // ==========================================
@@ -373,6 +623,13 @@
             </div>
 
             <div class="flex items-center gap-0.5 shrink-0">
+              <button onclick="event.stopPropagation(); downloadProjectBundle('${proj.id}')" class="p-1.5 rounded-lg text-surface-muted hover:text-amber-400 hover:bg-amber-500/10 transition" title="Скачать фильм (папки сцен и кадров)">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+              </button>
               <button onclick="event.stopPropagation(); openDeleteConfirm('project', '${proj.id}', '${esc(proj.title)}')" class="p-1.5 rounded-lg text-surface-muted hover:text-rose-400 hover:bg-rose-500/10 transition" title="Удалить">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                   <polyline points="3 6 5 6 21 6"></polyline>
@@ -572,6 +829,7 @@
               const shots = sc.shots || [];
               const shotsCount = shots.length;
               const shotDoneCount = shots.filter(sh => !!sh.shotDone).length;
+              const videosCount = shots.filter(sh => !!sh.videoId).length;
               const statusMeta = getSceneStatusMeta(sc);
               const metaParts = [
                 sc.timeOfDay ? sc.timeOfDay : null,
@@ -590,11 +848,23 @@
                     </div>
 
                     <p class="text-[10px] text-surface-muted truncate mt-0.5 leading-tight">
-                      ${metaParts.length > 0 ? esc(metaParts.join(' • ')) + ' • ' : ''}Кадров: ${shotsCount}${shotsCount > 0 ? ` (${shotDoneCount} снято)` : ''}
+                      ${metaParts.length > 0 ? esc(metaParts.join(' • ')) + ' • ' : ''}Кадров: ${shotsCount}${shotsCount > 0 ? ` (${shotDoneCount} снято)` : ''}${videosCount > 0 ? ` • 🎬 ${videosCount}` : ''}
                     </p>
                   </div>
 
                   <div class="flex items-center gap-1 shrink-0" onclick="event.stopPropagation()">
+                    <button
+                      onclick="downloadSceneBundle('${sc.id}')"
+                      class="p-1 rounded-lg text-surface-muted hover:text-amber-400 hover:bg-amber-500/10 transition"
+                      title="Скачать сцену (папки кадров + видео + txt)"
+                    >
+                      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                      </svg>
+                    </button>
+
                     <button
                       onclick="openSceneStatusModal('${sc.id}')"
                       class="px-2 py-1 rounded-lg text-[11px] font-bold border transition active:scale-95 ${statusMeta.btnClass}"
@@ -672,7 +942,7 @@
     }
 
     // ==========================================
-    // LEVEL 4: ВНУТРИ СЦЕНЫ (ПАРАМЕТРЫ + КАДРЫ)
+    // LEVEL 4: ВНУТРИ СЦЕНЫ (ПАРАМЕТРЫ + КАДРЫ + ВИДЕО)
     // ==========================================
     function renderLevel4Scene(header, main) {
       const proj = getProject();
@@ -757,6 +1027,56 @@
 
       const shotsHtml = shots.map((shot, idx) => {
         const isShotDone = !!shot.shotDone;
+        const hasVideo = !!shot.videoId;
+
+        const videoBlockHtml = hasVideo ? `
+          <div class="bg-surface-bg border border-surface-border/80 rounded-lg p-2 space-y-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-1.5 min-w-0">
+                <span class="text-amber-400 text-xs shrink-0">🎬</span>
+                <span class="text-[11px] font-medium text-gray-200 truncate">${esc(shot.videoName || 'Видео кадра')}</span>
+                ${shot.videoSize ? `<span class="text-[10px] text-surface-muted shrink-0">(${formatBytes(shot.videoSize)})</span>` : ''}
+              </div>
+              <div class="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onclick="triggerAttachVideo('${shot.id}')"
+                  class="px-1.5 py-0.5 rounded bg-surface-elevated border border-surface-border text-[10px] font-semibold text-gray-300 hover:text-amber-400 transition"
+                >
+                  Заменить
+                </button>
+                <button
+                  type="button"
+                  onclick="removeShotVideo('${shot.id}')"
+                  class="px-1.5 py-0.5 rounded bg-rose-500/10 border border-rose-500/30 text-[10px] font-semibold text-rose-300 hover:bg-rose-500/20 transition"
+                  title="Убрать видео"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            <video
+              id="video-preview-${shot.id}"
+              controls
+              playsinline
+              preload="metadata"
+              class="w-full max-h-40 rounded-md bg-black object-contain"
+            ></video>
+          </div>
+        ` : `
+          <button
+            type="button"
+            onclick="triggerAttachVideo('${shot.id}')"
+            class="w-full py-1.5 px-2.5 rounded-lg bg-surface-bg hover:bg-surface-elevated border border-dashed border-surface-border hover:border-amber-500/50 text-[11px] font-semibold text-surface-muted hover:text-amber-400 flex items-center justify-center gap-1.5 transition active:scale-[0.99]"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <polygon points="23 7 16 12 23 17 23 7"></polygon>
+              <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+            </svg>
+            <span>Прикрепить видео</span>
+          </button>
+        `;
+
         return `
           <div class="bg-surface-card border ${isShotDone ? 'border-emerald-500/35' : 'border-surface-border'} rounded-xl p-2.5 space-y-1.5 fade-in">
             <div class="flex items-center justify-between gap-1.5">
@@ -800,6 +1120,8 @@
               placeholder="Описание кадра, движение, реплики..."
               class="w-full bg-surface-bg border border-surface-border focus:border-amber-500 rounded-lg p-2 text-xs text-white placeholder-zinc-600 focus:outline-none leading-snug ${isShotDone ? 'text-gray-300' : ''}"
             >${esc(shot.desc || '')}</textarea>
+
+            ${videoBlockHtml}
           </div>
         `;
       }).join('');
@@ -819,6 +1141,64 @@
           ${renderListPlusButton('Создать кадр', 'addShotToScene()')}
         </div>
       `;
+    }
+
+    // ==========================================
+    // ПРИКРЕПЛЕНИЕ И УДАЛЕНИЕ ВИДЕО В КАДРЕ
+    // ==========================================
+    function triggerAttachVideo(shotId) {
+      state.pendingVideoShotId = shotId;
+      const input = document.getElementById('shot-video-input');
+      if (input) {
+        input.value = '';
+        input.click();
+      }
+    }
+
+    async function handleShotVideoSelected(e) {
+      const file = e.target.files?.[0];
+      const shotId = state.pendingVideoShotId;
+      state.pendingVideoShotId = null;
+      if (!file || !shotId) return;
+
+      const scene = getScene();
+      const shot = scene?.shots?.find(s => s.id === shotId);
+      if (!shot) return;
+
+      showToast('Сохраняю видео...', true);
+      try {
+        if (shot.videoId) {
+          await deleteVideoFromIDB(shot.videoId);
+        }
+        const newVideoId = uid('vid');
+        await saveVideoToIDB(newVideoId, file);
+
+        shot.videoId = newVideoId;
+        shot.videoName = file.name;
+        shot.videoSize = file.size;
+        saveDB();
+        render();
+        showToast('Видео прикреплено');
+      } catch (err) {
+        console.error(err);
+        showToast('Не удалось сохранить видео');
+      } finally {
+        e.target.value = '';
+      }
+    }
+
+    async function removeShotVideo(shotId) {
+      const scene = getScene();
+      const shot = scene?.shots?.find(s => s.id === shotId);
+      if (!shot || !shot.videoId) return;
+
+      await deleteVideoFromIDB(shot.videoId);
+      delete shot.videoId;
+      delete shot.videoName;
+      delete shot.videoSize;
+      saveDB();
+      render();
+      showToast('Видео удалено');
     }
 
     // ==========================================
@@ -1266,9 +1646,13 @@
       saveDB();
     }
 
-    function deleteShot(shotId) {
+    async function deleteShot(shotId) {
       const scene = getScene();
       if (!scene) return;
+      const target = (scene.shots || []).find(s => s.id === shotId);
+      if (target?.videoId) {
+        await deleteVideoFromIDB(target.videoId);
+      }
       scene.shots = (scene.shots || []).filter(s => s.id !== shotId);
       saveDB();
       render();
@@ -1311,15 +1695,39 @@
       `);
     }
 
-    function executeDelete(type, id) {
+    async function cleanupVideosForScenes(scenes) {
+      for (const sc of (scenes || [])) {
+        for (const sh of (sc.shots || [])) {
+          if (sh.videoId) {
+            await deleteVideoFromIDB(sh.videoId);
+          }
+        }
+      }
+    }
+
+    async function executeDelete(type, id) {
       if (type === 'project') {
+        const proj = state.projects.find(p => p.id === id);
+        if (proj) {
+          for (const shoot of (proj.shoots || [])) {
+            await cleanupVideosForScenes(shoot.scenes);
+          }
+        }
         state.projects = state.projects.filter(p => p.id !== id);
       } else if (type === 'shoot') {
         const proj = getProject();
-        if (proj) proj.shoots = (proj.shoots || []).filter(s => s.id !== id);
+        if (proj) {
+          const shoot = (proj.shoots || []).find(s => s.id === id);
+          if (shoot) await cleanupVideosForScenes(shoot.scenes);
+          proj.shoots = (proj.shoots || []).filter(s => s.id !== id);
+        }
       } else if (type === 'scene') {
         const shoot = getShoot();
-        if (shoot) shoot.scenes = (shoot.scenes || []).filter(sc => sc.id !== id);
+        if (shoot) {
+          const sc = (shoot.scenes || []).find(s => s.id === id);
+          if (sc) await cleanupVideosForScenes([sc]);
+          shoot.scenes = (shoot.scenes || []).filter(sc => sc.id !== id);
+        }
       }
       saveDB();
       closeModal();
@@ -1336,7 +1744,7 @@
           </div>
 
           <p class="text-[11px] text-surface-muted leading-relaxed">
-            Сохраните файл на компьютере и откройте на телефоне, чтобы перенести все фильмы, сцены и кадры.
+            Сохраните структуру проектов (названия, даты, сцены и тексты кадров) в JSON или загрузите из файла. Видео скачиваются кнопкой загрузки на карточке фильма или сцены.
           </p>
 
           <div class="space-y-2">
